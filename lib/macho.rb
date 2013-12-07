@@ -1,3 +1,5 @@
+require "macho/version"
+
 module MachO
 
   MH_MAGIC = 0xFEEDFACE
@@ -240,4 +242,3 @@ module MachO
     little_endian ? 'V' : 'N'
   end
 end
-
