@@ -40,5 +40,5 @@ send a Pull Request.
 Copying
 -------
 
-Copyright © 2011, Booyah, Inc. See the `COPYING` file for license
-rights and limitations (MIT).
+Copyright © 2011, Booyah, Inc. Additional contributions Copyright © 2013, Skillz, Inc.
+See the `COPYING` file for license rights and limitations (MIT).
