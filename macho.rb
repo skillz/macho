@@ -144,7 +144,6 @@ module MachO
 
       @cputype, @cpusubtype, @offset, @size, @align =
           io.read(20).unpack(MachO.format(@little_endian) * 5)
-      #puts "FatArch cputype #{@cputype} size #{@size.to_s(16)} offset #{@offset.to_s(16)}"
       self
     end
   end
@@ -209,8 +208,6 @@ module MachO
         @archs = [MachOExec.new(io)]
       end
 
-      puts "arch magic #{magic.to_s(16)} FAT : #{[FAT_MAGIC, FAT_CIGAM].include?(magic)}"
-
       self
     end
   end
@@ -243,14 +240,4 @@ module MachO
     little_endian ? 'V' : 'N'
   end
 end
-
-# test for multi/single arch binary uuid extractions
-if __FILE__ == $0
-  exec = MachO::Executable.new(ARGV[0])
-  exec.archs.each do |arch|
-    puts "magic #{arch.magic.to_s(16)}, uuid #{arch.uuid}"
-  end
-  puts "Binary contains %d architecture(s)" % exec.archs.length
-end
-
 
