@@ -3,6 +3,7 @@ module MachO
   MH_MAGIC = 0xfEEDFACE
   FAT_MAGIC = 0xBEBAFECA
   LC_ENCRYPTION_INFO = 0x21
+  LC_UUID	= 0x1b
 
   # Represents a Mach-O load command.
   class LoadCmd
@@ -13,6 +14,9 @@ module MachO
     attr_reader :cryptoff
     attr_reader :cryptsize
     attr_reader :cryptid
+
+    # LC_UUID
+    attr_reader :uuid
 
     def initialize(io)
       self.parse(io)
@@ -42,6 +46,10 @@ module MachO
         @cryptoff, @cryptsize, @cryptid = io.read(12).unpack('VVV')
       end
 
+      if (@cmd == LC_UUID)
+        @uuid = io.read(16).unpack('H*').join()
+      end
+
       # Seek to the end of this command (and the start of the next structure).
       io.seek(cmd_start + @cmdsize)
 
@@ -60,6 +68,7 @@ module MachO
     attr_reader :cmds
     attr_reader :sizeofcmds
     attr_reader :flags
+    attr_reader :uuid
 
     def initialize(io)
       self.parse(io)
@@ -82,10 +91,16 @@ module MachO
       #   uint32_t  flags;          /* flags */
       # };
       @magic, @cputype, @cpusubtype, @filetype, ncmds, @sizeofcmds, @flags =
-        io.read(28).unpack('VVVVVVV')
+      io.read(28).unpack('VVVVVVV')
 
       # Read all of the individual load commands.
-      @cmds = Array.new(ncmds) { |i| LoadCmd.new(io) }
+      @cmds = Array.new(ncmds) { |i|
+          lcd = LoadCmd.new(io)
+
+          if(lcd.cmd == LC_UUID)
+            @uuid = lcd.uuid
+          end
+      }
 
       self
     end
@@ -111,9 +126,10 @@ module MachO
       #   uint32_t  size;           /* size of this object file */
       #   uint32_t  align;          /* alignment as a power of 2 */
       # };
-      @cputype, @cpusubtype, @offset, @size, @align = 
-        io.read(20).unpack('VVVVV')
 
+      @cputype, @cpusubtype, @offset, @size, @align =
+        io.read(20).unpack('NNNNN')
+        #puts "FatArch cputype #{@cputype} size #{@size.to_s(16)} offset #{@offset.to_s(16)}"
       self
     end
   end
@@ -133,10 +149,12 @@ module MachO
       #   uint32_t  magic;      /* FAT_MAGIC */
       #   uint32_t  nfat_arch;  /* number of structs that follow */
       # };
-      @magic, count = io.read(8).read('NN')
+      io.seek(4)
+      count = io.read(4).unpack('N')[0]
+      #count = io.read(8).unpack('N*')[1]
 
       # Read the array of architures from the fat binary header.
-      @archs = Array.new(count) { |i| FatArch.new(io) }
+      @archs = Array.new(count) { |i|FatArch.new(io)}
 
       self
     end
@@ -161,7 +179,6 @@ module MachO
     def parse(io)
       # The magic header value indicates the executable type.
       magic = io.read(4).unpack('V')[0]
-
       if (magic == FAT_MAGIC)
         # This is a fat binary with multiple Mach-O architectures.
         @fat = Fat.new(io)
@@ -176,6 +193,8 @@ module MachO
         io.seek(-4, IO::SEEK_CUR)
         @archs = [MachO.new(io)]
       end
+
+      puts "arch magic #{magic.to_s(16)} FAT : #{magic == FAT_MAGIC}"
 
       self
     end
@@ -205,3 +224,12 @@ module MachO
     end
   end
 end
+
+# test for multi/single arch binary uuid extractions
+if __FILE__ == $0
+  exec = MachO::Executable.new(ARGV[0])
+  exec.archs.each {|arch| puts "magic #{arch.magic.to_s(16)}, uuid #{arch.uuid}" }
+  puts "Binary contains %d architecture(s)" % exec.archs.length
+end
+
+
