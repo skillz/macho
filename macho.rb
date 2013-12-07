@@ -1,7 +1,11 @@
 module MachO
 
-  MH_MAGIC = 0xfEEDFACE
-  FAT_MAGIC = 0xBEBAFECA
+  MH_MAGIC = 0xFEEDFACE
+  MH_CIGAM = 0xCEFAEDFE
+  MH_MAGIC_64 = 0xFEEDFACF
+  MH_CIGAM_64 = 0xCFFAEDFE
+  FAT_MAGIC = 0xCAFEBABE
+  FAT_CIGAM = 0xBEBAFECA
   LC_ENCRYPTION_INFO = 0x21
   LC_UUID	= 0x1b
 
@@ -18,7 +22,9 @@ module MachO
     # LC_UUID
     attr_reader :uuid
 
-    def initialize(io)
+    def initialize(io, little_endian, obj64)
+      @little_endian = little_endian
+      @obj64 = obj64
       self.parse(io)
     end
 
@@ -28,7 +34,7 @@ module MachO
       cmd_start = io.pos
 
       # All commands start with an identifier and size field.
-      @cmd, @cmdsize = io.read(8).unpack('VV')
+      @cmd, @cmdsize = io.read(8).unpack(MachO.format(@little_endian) * 2)
 
       # /*
       #  * The encryption_info_command contains the file offset and size of an
@@ -42,11 +48,12 @@ module MachO
       #    uint32_t cryptid;    /* which enryption system,
       #                            0 means not-encrypted yet */
       # };
-      if (@cmd == LC_ENCRYPTION_INFO)
-        @cryptoff, @cryptsize, @cryptid = io.read(12).unpack('VVV')
+      if @cmd == LC_ENCRYPTION_INFO
+        @cryptoff, @cryptsize, @cryptid = io.read(12).unpack(
+            MachO.format(@little_endian) * 3)
       end
 
-      if (@cmd == LC_UUID)
+      if @cmd == LC_UUID
         @uuid = io.read(16).unpack('H*').join()
       end
 
@@ -58,7 +65,7 @@ module MachO
   end
 
   # Represents a Mach-O executable.
-  class MachO
+  class MachOExec
 
     attr_reader :offset
     attr_reader :magic
@@ -77,6 +84,11 @@ module MachO
     def parse(io)
       @offset = io.pos
 
+      @magic = io.read(4).unpack('N')[0]
+
+      @little_endian = [MH_CIGAM, MH_CIGAM_64].include?(magic)
+      @obj64 = [MH_MAGIC_64, MH_CIGAM_64].include?(magic)
+
       # /*
       #  * The 32-bit mach header appears at the very beginning of the object file for
       #  * 32-bit architectures.
@@ -90,17 +102,19 @@ module MachO
       #   uint32_t  sizeofcmds;     /* the size of all the load commands */
       #   uint32_t  flags;          /* flags */
       # };
-      @magic, @cputype, @cpusubtype, @filetype, ncmds, @sizeofcmds, @flags =
-      io.read(28).unpack('VVVVVVV')
+      @cputype, @cpusubtype, @filetype, ncmds, @sizeofcmds, @flags =
+          io.read(24).unpack(MachO.format(@little_endian) * 6)
+      ext64bit = io.read(4).unpack(MachO.format(@little_endian)) if @obj64
 
       # Read all of the individual load commands.
-      @cmds = Array.new(ncmds) { |i|
-          lcd = LoadCmd.new(io)
+      @cmds = (1..ncmds).map do |i|
+        lcd = LoadCmd.new(io, @little_endian, @obj64)
 
-          if(lcd.cmd == LC_UUID)
-            @uuid = lcd.uuid
-          end
-      }
+        if lcd.cmd == LC_UUID
+          @uuid = lcd.uuid
+        end
+        lcd
+      end
 
       self
     end
@@ -114,7 +128,8 @@ module MachO
     attr_reader :size
     attr_reader :align
 
-    def initialize(io)
+    def initialize(io, little_endian)
+      @little_endian = little_endian
       self.parse(io)
     end
 
@@ -128,8 +143,8 @@ module MachO
       # };
 
       @cputype, @cpusubtype, @offset, @size, @align =
-        io.read(20).unpack('NNNNN')
-        #puts "FatArch cputype #{@cputype} size #{@size.to_s(16)} offset #{@offset.to_s(16)}"
+          io.read(20).unpack(MachO.format(@little_endian) * 5)
+      #puts "FatArch cputype #{@cputype} size #{@size.to_s(16)} offset #{@offset.to_s(16)}"
       self
     end
   end
@@ -137,10 +152,10 @@ module MachO
   # Represents the fat binary structure used to indicate that an executable
   # supports multiple architectures.
   class Fat
-    attr_reader :magic
     attr_reader :archs
 
-    def initialize(io)
+    def initialize(io, little_endian)
+      @little_endian = little_endian
       self.parse(io)
     end
 
@@ -149,12 +164,11 @@ module MachO
       #   uint32_t  magic;      /* FAT_MAGIC */
       #   uint32_t  nfat_arch;  /* number of structs that follow */
       # };
-      io.seek(4)
-      count = io.read(4).unpack('N')[0]
-      #count = io.read(8).unpack('N*')[1]
+      io.seek(4) # skip magic
+      count = io.read(4).unpack(MachO.format(@little_endian))[0]
 
-      # Read the array of architures from the fat binary header.
-      @archs = Array.new(count) { |i|FatArch.new(io)}
+      # Read the array of architectures from the fat binary header.
+      @archs = Array.new(count) { |i| FatArch.new(io, @little_endian) }
 
       self
     end
@@ -170,7 +184,7 @@ module MachO
     attr_reader :archs
 
     def initialize(file)
-      if not file.respond_to?(:seek)
+      unless file.respond_to?(:seek)
         file = File.new(file, 'r')
       end
       self.parse(file)
@@ -178,23 +192,24 @@ module MachO
 
     def parse(io)
       # The magic header value indicates the executable type.
-      magic = io.read(4).unpack('V')[0]
-      if (magic == FAT_MAGIC)
+      magic = io.read(4).unpack('N')[0]
+      if [FAT_MAGIC, FAT_CIGAM].include?(magic)
+        little_endian = FAT_CIGAM == magic
         # This is a fat binary with multiple Mach-O architectures.
-        @fat = Fat.new(io)
+        @fat = Fat.new(io, little_endian)
         # Parse each Mach-O architecture based on its offet in the binary.
         @archs = @fat.archs.collect do |arch|
           io.seek(arch.offset)
-          MachO.new(io)
+          MachOExec.new(io)
         end
-      elsif (magic == MH_MAGIC)
+      elsif [MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64].include?(magic)
         # This is a non-fat binary with a single Mach-O architecture.
         # Reset our IO stream so the start of the Mach-O header.
         io.seek(-4, IO::SEEK_CUR)
-        @archs = [MachO.new(io)]
+        @archs = [MachOExec.new(io)]
       end
 
-      puts "arch magic #{magic.to_s(16)} FAT : #{magic == FAT_MAGIC}"
+      puts "arch magic #{magic.to_s(16)} FAT : #{[FAT_MAGIC, FAT_CIGAM].include?(magic)}"
 
       self
     end
@@ -213,7 +228,7 @@ module MachO
       data_offset = arch_offset + macho.sizeofcmds
 
       for cmd in macho.cmds do
-        if (cmd.cmd == LC_ENCRYPTION_INFO)
+        if cmd.cmd == LC_ENCRYPTION_INFO
           random_bytes = Array.new(cmd.cryptsize)
           random_bytes.fill { rand(256) }
 
@@ -223,12 +238,18 @@ module MachO
       end
     end
   end
+
+  def self.format(little_endian)
+    little_endian ? 'V' : 'N'
+  end
 end
 
 # test for multi/single arch binary uuid extractions
 if __FILE__ == $0
   exec = MachO::Executable.new(ARGV[0])
-  exec.archs.each {|arch| puts "magic #{arch.magic.to_s(16)}, uuid #{arch.uuid}" }
+  exec.archs.each do |arch|
+    puts "magic #{arch.magic.to_s(16)}, uuid #{arch.uuid}"
+  end
   puts "Binary contains %d architecture(s)" % exec.archs.length
 end
 
